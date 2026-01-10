@@ -12,12 +12,20 @@ import (
 
 const (
 	defaultBatchSize    = 1024 // UIO_MAXIOV on Linux
-	defaultFlushTimeout = 100 * time.Millisecond
+	defaultFlushTimeout = 10 * time.Millisecond
+	maxPacketSize       = 1500 // MTU size for buffer pool
 )
 
 // writeBatchConn is the interface needed for batched writes (sendmmsg).
 type writeBatchConn interface {
 	WriteBatch(ms []ipv4.Message, flags int) (int, error)
+}
+
+// sendBatchBufferPool reuses packet buffers to reduce allocations
+var sendBatchBufferPool = sync.Pool{
+	New: func() any {
+		return make([]byte, maxPacketSize)
+	},
 }
 
 // packetBatcher batches outgoing packets and sends them using sendmmsg via ipv4.WriteBatch.
@@ -26,6 +34,7 @@ type packetBatcher struct {
 	mu       sync.Mutex
 	pc       writeBatchConn
 	pending  []ipv4.Message
+	buffers  [][]byte // track buffers to return to pool after flush
 	maxBatch int
 
 	// For automatic flushing
@@ -42,6 +51,7 @@ func newPacketBatcher(conn writeBatchConn, maxBatch int) *packetBatcher {
 	return &packetBatcher{
 		pc:       conn,
 		pending:  make([]ipv4.Message, 0, maxBatch),
+		buffers:  make([][]byte, 0, maxBatch),
 		maxBatch: maxBatch,
 	}
 }
@@ -52,27 +62,24 @@ func (b *packetBatcher) QueuePacket(data []byte, addr net.Addr, oob []byte) erro
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// Copy data since original buffer will be reused
-	buf := make([]byte, len(data))
-	copy(buf, data)
-
 	// Ensure we have a *net.UDPAddr for WriteBatch
 	udpAddr, ok := addr.(*net.UDPAddr)
 	if !ok {
 		return nil
 	}
 
+	// Get buffer from pool and copy data
+	buf := sendBatchBufferPool.Get().([]byte)
+	buf = buf[:len(data)] // slice to actual data size
+	copy(buf, data)
+	b.buffers = append(b.buffers, buf) // track for return to pool
+
 	msg := ipv4.Message{
 		Buffers: [][]byte{buf},
 		Addr:    udpAddr,
 	}
 
-	// Copy OOB data if present (contains GSO/ECN control messages)
-	if len(oob) > 0 {
-		oobCopy := make([]byte, len(oob))
-		copy(oobCopy, oob)
-		msg.OOB = oobCopy
-	}
+	// Note: we skip OOB data for batched packets (no GSO/ECN)
 
 	b.pending = append(b.pending, msg)
 
@@ -113,6 +120,12 @@ func (b *packetBatcher) flushLocked() error {
 
 	// WriteBatch uses sendmmsg on Linux
 	_, err := b.pc.WriteBatch(b.pending, 0)
+
+	// Return all buffers to pool
+	for _, buf := range b.buffers {
+		sendBatchBufferPool.Put(buf[:maxPacketSize]) // restore full capacity before returning
+	}
+	b.buffers = b.buffers[:0]
 
 	// Clear the pending slice (reuse underlying array)
 	b.pending = b.pending[:0]
