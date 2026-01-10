@@ -64,6 +64,11 @@ func isECNDisabledUsingEnv() bool {
 	return err == nil && disabled
 }
 
+func isSendmmsgEnabled() bool {
+	enabled, err := strconv.ParseBool(os.Getenv("QUIC_GO_ENABLE_SENDMMSG"))
+	return err == nil && enabled
+}
+
 type oobConn struct {
 	OOBCapablePacketConn
 	batchConn batchConn
@@ -74,6 +79,9 @@ type oobConn struct {
 	buffers  [batchSize]*packetBuffer
 
 	cap connCapabilities
+
+	// batcher for sendmmsg support (optional, nil if not enabled)
+	batcher *packetBatcher
 }
 
 var _ rawConn = &oobConn{}
@@ -154,6 +162,14 @@ func newConn(c OOBCapablePacketConn, supportsDF bool) (*oobConn, error) {
 	for i := 0; i < batchSize; i++ {
 		oobConn.messages[i].OOB = make([]byte, oobBufferSize)
 	}
+
+	// Initialize batcher for sendmmsg support if enabled
+	if isSendmmsgEnabled() {
+		if wbc, ok := bc.(writeBatchConn); ok {
+			oobConn.batcher = newPacketBatcher(wbc, defaultBatchSize)
+		}
+	}
+
 	return oobConn, nil
 }
 
@@ -264,12 +280,30 @@ func (c *oobConn) WritePacket(b []byte, addr net.Addr, packetInfoOOB []byte, gso
 			}
 		}
 	}
+
+	// Use batcher if enabled (sendmmsg support)
+	if c.batcher != nil && gsoSize == 0 {
+		err := c.batcher.QueuePacket(b, addr, nil)
+		if err != nil {
+			return 0, err
+		}
+		return len(b), nil
+	}
+
 	n, _, err := c.WriteMsgUDP(b, oob, addr.(*net.UDPAddr))
 	return n, err
 }
 
 func (c *oobConn) capabilities() connCapabilities {
 	return c.cap
+}
+
+// Close flushes any pending batched packets and closes the connection.
+func (c *oobConn) Close() error {
+	if c.batcher != nil {
+		c.batcher.Close()
+	}
+	return c.OOBCapablePacketConn.Close()
 }
 
 type packetInfo struct {
