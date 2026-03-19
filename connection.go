@@ -99,9 +99,6 @@ func (e *errCloseForRecreating) Error() string {
 
 var deadlineSendImmediately = monotime.Time(42 * time.Millisecond) // any value > time.Time{} and before time.Now() is fine
 
-var connTracingID atomic.Uint64              // to be accessed atomically
-func nextConnTracingID() ConnectionTracingID { return ConnectionTracingID(connTracingID.Add(1)) }
-
 type blockMode uint8
 
 const (
@@ -777,10 +774,16 @@ func (c *Conn) supportsDatagrams() bool {
 func (c *Conn) ConnectionState() ConnectionState {
 	c.connStateMutex.Lock()
 	defer c.connStateMutex.Unlock()
+
 	cs := c.cryptoStreamHandler.ConnectionState()
 	c.connState.TLS = cs.ConnectionState
 	c.connState.Used0RTT = cs.Used0RTT
-	c.connState.SupportsStreamResetPartialDelivery = c.peerParams.EnableResetStreamAt
+	if c.peerParams != nil {
+		c.connState.SupportsDatagrams.Remote = c.supportsDatagrams()
+		c.connState.SupportsStreamResetPartialDelivery.Remote = c.peerParams.EnableResetStreamAt
+	}
+	c.connState.SupportsDatagrams.Local = c.config.EnableDatagrams
+	c.connState.SupportsStreamResetPartialDelivery.Local = c.config.EnableStreamResetPartialDelivery
 	c.connState.GSO = c.conn.capabilities().GSO
 	return c.connState
 }
@@ -1280,7 +1283,7 @@ func (c *Conn) handleShortHeaderPacket(
 		c.logger.Debugf("sending path probe packet to %s", p.remoteAddr)
 		c.logShortHeaderPacketWithDatagramID(probe, protocol.ECNNon, buf.Len(), false, datagramID)
 		c.registerPackedShortHeaderPacket(probe, protocol.ECNNon, p.rcvTime)
-		c.sendQueue.SendProbe(buf, p.remoteAddr)
+		c.sendQueue.SendProbe(buf, p.remoteAddr, p.info)
 	}
 	// We only switch paths in response to the highest-numbered non-probing packet,
 	// see section 9.3 of RFC 9000.
@@ -2345,9 +2348,6 @@ func (c *Conn) restoreTransportParameters(params *wire.TransportParameters) {
 	c.connIDGenerator.SetMaxActiveConnIDs(params.ActiveConnectionIDLimit)
 	c.connFlowController.UpdateSendWindow(params.InitialMaxData)
 	c.streamsMap.HandleTransportParameters(params)
-	c.connStateMutex.Lock()
-	c.connState.SupportsDatagrams = c.supportsDatagrams()
-	c.connStateMutex.Unlock()
 }
 
 func (c *Conn) handleTransportParameters(params *wire.TransportParameters) error {
@@ -2377,10 +2377,6 @@ func (c *Conn) handleTransportParameters(params *wire.TransportParameters) error
 		// the client's transport parameters.
 		close(c.earlyConnReadyChan)
 	}
-
-	c.connStateMutex.Lock()
-	c.connState.SupportsDatagrams = c.supportsDatagrams()
-	c.connStateMutex.Unlock()
 	return nil
 }
 

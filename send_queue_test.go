@@ -2,11 +2,12 @@ package quic
 
 import (
 	"net"
+	"net/netip"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/synctest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -196,6 +197,11 @@ func TestSendQueueSendProbe(t *testing.T) {
 	q := newSendQueue(c)
 
 	addr := &net.UDPAddr{IP: net.IPv4(42, 42, 42, 42), Port: 42}
-	c.EXPECT().WriteTo([]byte("foobar"), addr)
-	q.SendProbe(getPacketWithContents([]byte("foobar")), addr)
+	localAddr := netip.MustParseAddr("43.43.43.43")
+	c.EXPECT().WriteTo([]byte("foobar"), addr, packetInfo{
+		addr: localAddr,
+	})
+	q.SendProbe(getPacketWithContents([]byte("foobar")), addr, packetInfo{
+		addr: localAddr,
+	})
 }

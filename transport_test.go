@@ -7,16 +7,14 @@ import (
 	"errors"
 	"math"
 	"net"
-	"runtime"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/quic-go/quic-go/internal/protocol"
 	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/synctest"
 	"github.com/quic-go/quic-go/internal/utils"
 	"github.com/quic-go/quic-go/internal/wire"
 	"github.com/quic-go/quic-go/qlog"
@@ -644,11 +642,6 @@ func TestTransportDialingVersionNegotiation(t *testing.T) {
 }
 
 func TestTransportReplaceWithClosed(t *testing.T) {
-	// synctest works slightly differently on Go 1.24,
-	// so we skip the test
-	if strings.HasPrefix(runtime.Version(), "go1.24") {
-		t.Skip("skipping on Go 1.24 due to synctest issues")
-	}
 	t.Run("local", func(t *testing.T) {
 		testTransportReplaceWithClosed(t, true)
 	})

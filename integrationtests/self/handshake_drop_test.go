@@ -8,17 +8,15 @@ import (
 	"io"
 	mrand "math/rand/v2"
 	"net"
-	"runtime"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/synctest"
 	"github.com/quic-go/quic-go/qlog"
 	"github.com/quic-go/quic-go/testutils/events"
 	"github.com/quic-go/quic-go/testutils/simnet"
@@ -308,13 +306,11 @@ func TestHandshakeWithPacketLoss(t *testing.T) {
 								defer ln.Close()
 
 								conn := test.fn(t, ln, clientConn, clientConf, timeout, data)
-								if !strings.HasPrefix(runtime.Version(), "go1.24") {
-									curveID := getCurveID(conn.ConnectionState().TLS)
-									if conf.postQuantum {
-										require.Equal(t, tls.X25519MLKEM768, curveID)
-									} else {
-										require.Equal(t, tls.CurveP384, curveID)
-									}
+								curveID := getCurveID(conn.ConnectionState().TLS)
+								if conf.postQuantum {
+									require.Equal(t, tls.X25519MLKEM768, curveID)
+								} else {
+									require.Equal(t, tls.CurveP384, curveID)
 								}
 
 								if pattern != dropPatternDropOneThirdOfPackets {

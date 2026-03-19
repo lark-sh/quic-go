@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"errors"
 	"io"
 	mrand "math/rand/v2"
 	"net/http"
@@ -19,7 +18,6 @@ import (
 	"github.com/quic-go/quic-go/quicvarint"
 	"github.com/quic-go/quic-go/testutils/events"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 )
@@ -40,7 +38,7 @@ func testClientSettings(t *testing.T, enableDatagrams bool, other map[uint64]uin
 	}
 
 	var eventRecorder events.Recorder
-	clientConn, serverConn := newConnPairWithRecorder(t, &eventRecorder, nil)
+	clientConn, serverConn := newConnPair(t, withClientRecorder(&eventRecorder))
 	tr.NewClientConn(clientConn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -83,6 +81,8 @@ func testClientSettings(t *testing.T, enableDatagrams bool, other map[uint64]uin
 }
 
 func encodeResponse(t *testing.T, status int) []byte {
+	t.Helper()
+
 	mockCtrl := gomock.NewController(t)
 	buf := &bytes.Buffer{}
 	rstr := NewMockDatagramStream(mockCtrl)
@@ -575,97 +575,303 @@ func TestClientRequestCancellation(t *testing.T) {
 	expectStreamWriteReset(t, str, quic.StreamErrorCode(ErrCodeRequestCanceled))
 }
 
-func TestClientStreamHijacking(t *testing.T) {
-	t.Run("unidirectional", func(t *testing.T) {
-		t.Run("hijacking", func(t *testing.T) {
-			testClientStreamHijacking(t, false, true, nil)
-		})
-		t.Run("stream error", func(t *testing.T) {
-			testClientStreamHijacking(t, false, false, assert.AnError)
-		})
+func TestClientConnGoAway(t *testing.T) {
+	t.Run("no active streams", func(t *testing.T) {
+		testClientConnGoAway(t, false)
 	})
 
-	t.Run("bidirectional", func(t *testing.T) {
-		t.Run("hijacking", func(t *testing.T) {
-			testClientStreamHijacking(t, true, true, nil)
-		})
-		t.Run("stream error", func(t *testing.T) {
-			testClientStreamHijacking(t, true, false, assert.AnError)
-		})
+	t.Run("active stream", func(t *testing.T) {
+		testClientConnGoAway(t, true)
 	})
 }
 
-func testClientStreamHijacking(t *testing.T, bidirectional, doHijack bool, streamReadErr error) {
-	type hijackCall struct {
-		ft            FrameType  // for bidirectional streams
-		st            StreamType // for unidirectional streams
-		connTracingID quic.ConnectionTracingID
-		e             error
+func testClientConnGoAway(t *testing.T, withStream bool) {
+	var clientEventRecorder events.Recorder
+	clientConn, serverConn := newConnPair(t, withClientRecorder(&clientEventRecorder))
+
+	cc := (&Transport{}).NewClientConn(clientConn)
+
+	var str *RequestStream
+	if withStream {
+		s, err := cc.OpenRequestStream(context.Background())
+		require.NoError(t, err)
+		str = s
 	}
 
-	hijackChan := make(chan hijackCall, 1)
-	tr := &Transport{}
-	switch bidirectional {
-	case true:
-		tr.StreamHijacker = func(ft FrameType, id quic.ConnectionTracingID, _ *quic.Stream, e error) (hijacked bool, err error) {
-			hijackChan <- hijackCall{ft: ft, connTracingID: id, e: e}
-			if !doHijack {
-				return false, errors.New("not hijacking")
-			}
-			return true, nil
+	// server sends control stream with SETTINGS and GOAWAY
+	b := quicvarint.Append(nil, streamTypeControlStream)
+	b = (&settingsFrame{}).Append(b)
+	b = (&goAwayFrame{StreamID: 8}).Append(b)
+	controlStr, err := serverConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = controlStr.Write(b)
+	require.NoError(t, err)
+
+	// the connection should be closed after the stream is closed
+	if withStream {
+		select {
+		case <-serverConn.Context().Done():
+			t.Fatal("connection closed")
+		case <-time.After(scaleDuration(10 * time.Millisecond)):
 		}
-	case false:
-		tr.UniStreamHijacker = func(st StreamType, id quic.ConnectionTracingID, rs *quic.ReceiveStream, e error) (hijacked bool) {
-			hijackChan <- hijackCall{st: st, connTracingID: id, e: e}
-			return doHijack
-		}
+
+		// the stream ID in the GOAWAY frame is 8, so it's possible to open stream 4
+		str2, err := cc.OpenRequestStream(context.Background())
+		require.NoError(t, err)
+		str2.Close()
+		str2.CancelRead(1337)
+
+		// it's not possible to open stream 8
+		_, err = cc.OpenRequestStream(context.Background())
+		require.ErrorIs(t, err, errGoAway)
+
+		str.Close()
+		str.CancelRead(1337)
 	}
-
-	clientConn, serverConn := newConnPair(t)
-
-	b := quicvarint.Append(nil, 0x41)
-	if bidirectional {
-		str, err := serverConn.OpenStream()
-		require.NoError(t, err)
-		_, err = str.Write(b)
-		require.NoError(t, err)
-
-		if streamReadErr != nil {
-			str.CancelWrite(1337)
-			time.Sleep(scaleDuration(10 * time.Millisecond)) // wait for the reset to be received
-		}
-	} else {
-		str, err := serverConn.OpenUniStream()
-		require.NoError(t, err)
-		_, err = str.Write(b)
-		require.NoError(t, err)
-
-		if streamReadErr != nil {
-			str.CancelWrite(1337)
-			time.Sleep(scaleDuration(10 * time.Millisecond)) // wait for the reset to be received
-		}
-	}
-
-	_ = tr.NewClientConn(clientConn)
 
 	select {
-	case hijackCall := <-hijackChan:
-		assert.Equal(t, clientConn.Context().Value(quic.ConnectionTracingKey), hijackCall.connTracingID)
-		if streamReadErr == nil {
-			if bidirectional {
-				assert.Equal(t, FrameType(0x41), hijackCall.ft)
-			} else {
-				assert.Equal(t, StreamType(0x41), hijackCall.st)
+	case <-serverConn.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(serverConn.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeNoError)},
+		)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for close")
+	}
+
+	expectedLen, expectedPayloadLen := expectedFrameLength(t, &goAwayFrame{StreamID: 8})
+	require.Equal(t,
+		[]qlogwriter.Event{
+			qlog.FrameParsed{
+				StreamID: controlStr.StreamID(),
+				Raw:      qlog.RawInfo{PayloadLength: expectedPayloadLen, Length: expectedLen},
+				Frame:    qlog.Frame{Frame: qlog.GoAwayFrame{StreamID: 8}},
+			},
+		},
+		filterQlogEventsForFrame(clientEventRecorder.Events(qlog.FrameParsed{}), qlog.GoAwayFrame{StreamID: 8}),
+	)
+}
+
+func TestClientConnGoConcurrent(t *testing.T) {
+	clientConn, serverConn := newConnPair(t, withServerBidiStreamLimit(1)) // allows streams 0
+
+	cc := (&Transport{}).NewClientConn(clientConn)
+
+	// peer sends control stream with SETTINGS, but not GOAWAY yet
+	b := quicvarint.Append(nil, streamTypeControlStream)
+	b = (&settingsFrame{}).Append(b)
+	controlStr, err := serverConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = controlStr.Write(b)
+	require.NoError(t, err)
+
+	select {
+	case <-serverConn.Context().Done():
+		t.Fatal("connection closed")
+	case <-time.After(scaleDuration(10 * time.Millisecond)):
+	}
+
+	// of these 2 OpenStreamSync calls, one will succeed, the other one will block
+	errChan := make(chan error, 3)
+	for range 2 {
+		go func() {
+			str, err := cc.OpenRequestStream(context.Background())
+			if err == nil {
+				str.Close()
 			}
-			assert.NoError(t, hijackCall.e)
-		} else {
-			var strErr *quic.StreamError
-			require.ErrorAs(t, hijackCall.e, &strErr)
-			assert.Equal(t, quic.StreamErrorCode(1337), strErr.ErrorCode)
-		}
+			errChan <- err
+		}()
+	}
+
+	// wait until all Goroutines have started
+	time.Sleep(scaleDuration(10 * time.Millisecond))
+
+	select {
+	case err := <-errChan:
+		require.NoError(t, err)
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
 	}
+	// the second stream is still blocked
+	select {
+	case <-errChan:
+		t.Fatal("second OpenStreamSync should have blocked")
+	case <-time.After(scaleDuration(10 * time.Millisecond)):
+	}
 
-	// if the stream is not hijacked, the frame parser will skip the frame
+	// send the GOAWAY frame
+	b = (&goAwayFrame{StreamID: 4}).Append(nil)
+	_, err = controlStr.Write(b)
+	require.NoError(t, err)
+
+	// accepting and closing the stream allows the client to open another stream
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	sstr, err := serverConn.AcceptStream(ctx)
+	require.NoError(t, err)
+	sstr.Close()
+	sstr.CancelRead(1337)
+
+	// The second stream is opened by the client,
+	// and immediately closed with a H3_REQUEST_CANCELED error.
+	select {
+	case err := <-errChan:
+		require.ErrorIs(t, err, errGoAway)
+	case <-time.After(scaleDuration(10 * time.Millisecond)):
+		t.Fatal("timeout")
+	}
+
+	sstr, err = serverConn.AcceptStream(ctx)
+	require.NoError(t, err)
+	_, err = sstr.Read([]byte{0})
+	require.ErrorIs(t, err, &quic.StreamError{StreamID: 4, ErrorCode: quic.StreamErrorCode(ErrCodeRequestCanceled), Remote: true})
+}
+
+func TestClientConnGoAwayFailures(t *testing.T) {
+	t.Run("invalid frame", func(t *testing.T) {
+		b := (&settingsFrame{}).Append(nil)
+		// 1337 is invalid value for the Extended CONNECT setting
+		b = (&settingsFrame{Other: map[uint64]uint64{settingExtendedConnect: 1337}}).Append(b)
+		testClientConnGoAwayFailures(t, b, nil, ErrCodeFrameError)
+	})
+
+	t.Run("not a GOAWAY", func(t *testing.T) {
+		b := (&settingsFrame{}).Append(nil)
+		// GOAWAY is the only allowed frame type after SETTINGS
+		b = (&headersFrame{}).Append(b)
+		testClientConnGoAwayFailures(t, b, nil, ErrCodeFrameUnexpected)
+	})
+
+	t.Run("stream closed before GOAWAY", func(t *testing.T) {
+		testClientConnGoAwayFailures(t, (&settingsFrame{}).Append(nil), io.EOF, ErrCodeClosedCriticalStream)
+	})
+
+	t.Run("stream reset before GOAWAY", func(t *testing.T) {
+		testClientConnGoAwayFailures(t,
+			(&settingsFrame{}).Append(nil),
+			&quic.StreamError{Remote: true, ErrorCode: 42},
+			ErrCodeClosedCriticalStream,
+		)
+	})
+
+	t.Run("invalid stream ID", func(t *testing.T) {
+		data := (&settingsFrame{}).Append(nil)
+		data = (&goAwayFrame{StreamID: 1}).Append(data)
+		testClientConnGoAwayFailures(t, data, nil, ErrCodeIDError)
+	})
+
+	t.Run("increased stream ID", func(t *testing.T) {
+		localConn, peerConn := newConnPair(t)
+
+		cc := (&Transport{}).NewClientConn(localConn)
+
+		// need an active stream so the connection doesn't close after the first GOAWAY
+		_, err := cc.OpenRequestStream(context.Background())
+		require.NoError(t, err)
+
+		controlStr, err := peerConn.OpenUniStream()
+		require.NoError(t, err)
+		b := quicvarint.Append(nil, streamTypeControlStream)
+		b = (&settingsFrame{}).Append(b)
+		b = (&goAwayFrame{StreamID: 4}).Append(b)
+		b = (&goAwayFrame{StreamID: 8}).Append(b)
+		_, err = controlStr.Write(b)
+		require.NoError(t, err)
+
+		select {
+		case <-peerConn.Context().Done():
+			require.ErrorIs(t,
+				context.Cause(peerConn.Context()),
+				&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeIDError)},
+			)
+		case <-time.After(time.Second):
+			t.Fatal("timeout waiting for close")
+		}
+	})
+}
+
+func testClientConnGoAwayFailures(t *testing.T, data []byte, readErr error, expectedErr ErrCode) {
+	localConn, peerConn := newConnPair(t)
+
+	(&Transport{}).NewClientConn(localConn)
+
+	controlStr, err := peerConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = controlStr.Write(quicvarint.Append(nil, streamTypeControlStream))
+	require.NoError(t, err)
+
+	switch readErr {
+	case nil:
+		_, err = controlStr.Write(data)
+		require.NoError(t, err)
+	case io.EOF:
+		_, err = controlStr.Write(data)
+		require.NoError(t, err)
+		require.NoError(t, controlStr.Close())
+	default:
+		// make sure the stream type is received
+		time.Sleep(scaleDuration(10 * time.Millisecond))
+		controlStr.CancelWrite(1337)
+	}
+
+	select {
+	case <-peerConn.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(peerConn.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(expectedErr)},
+		)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for close")
+	}
+}
+
+func TestClientConnHandleBidirectionalStream(t *testing.T) {
+	clientConn, serverConn := newConnPair(t)
+
+	cc := (&Transport{}).NewClientConn(clientConn)
+
+	str, err := clientConn.OpenStream()
+	require.NoError(t, err)
+	cc.HandleBidirectionalStream(str)
+
+	select {
+	case <-serverConn.Context().Done():
+		require.ErrorIs(t,
+			context.Cause(serverConn.Context()),
+			&quic.ApplicationError{Remote: true, ErrorCode: quic.ApplicationErrorCode(ErrCodeStreamCreationError)},
+		)
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for connection close")
+	}
+}
+
+func TestRawClientConnHandleUnidirectionalStream(t *testing.T) {
+	clientConn, serverConn := newConnPair(t)
+
+	cc := (&Transport{}).NewRawClientConn(clientConn)
+
+	b := quicvarint.Append(nil, streamTypeControlStream)
+	b = (&settingsFrame{}).Append(b)
+	str, err := serverConn.OpenUniStream()
+	require.NoError(t, err)
+	_, err = str.Write(b)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	uniStr, err := clientConn.AcceptUniStream(ctx)
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cc.HandleUnidirectionalStream(uniStr)
+	}()
+
+	select {
+	case <-cc.ReceivedSettings():
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for settings")
+	}
+	require.NotNil(t, cc.Settings())
 }

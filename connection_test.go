@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"strconv"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/quic-go/quic-go/internal/ackhandler"
@@ -21,7 +22,6 @@ import (
 	"github.com/quic-go/quic-go/internal/monotime"
 	"github.com/quic-go/quic-go/internal/protocol"
 	"github.com/quic-go/quic-go/internal/qerr"
-	"github.com/quic-go/quic-go/internal/synctest"
 	"github.com/quic-go/quic-go/internal/utils"
 	"github.com/quic-go/quic-go/internal/wire"
 	"github.com/quic-go/quic-go/qlog"
@@ -3248,8 +3248,8 @@ func testConnectionPathValidation(t *testing.T, isNATRebinding bool) {
 					return shortHeaderPacket{IsPathProbePacket: true}, getPacketBuffer(), nil
 				},
 			),
-			tc.sendConn.EXPECT().WriteTo(gomock.Any(), newRemoteAddr).DoAndReturn(
-				func([]byte, net.Addr) error { close(probeSent); return nil },
+			tc.sendConn.EXPECT().WriteTo(gomock.Any(), newRemoteAddr, packetInfo{}).DoAndReturn(
+				func([]byte, net.Addr, packetInfo) error { close(probeSent); return nil },
 			),
 			tc.packer.EXPECT().AppendPacket(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(
 				shortHeaderPacket{}, errNothingToPack,

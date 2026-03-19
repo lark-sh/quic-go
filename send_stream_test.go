@@ -13,13 +13,13 @@ import (
 	"runtime"
 	"slices"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/quic-go/quic-go/internal/ackhandler"
 	"github.com/quic-go/quic-go/internal/mocks"
 	"github.com/quic-go/quic-go/internal/monotime"
 	"github.com/quic-go/quic-go/internal/protocol"
-	"github.com/quic-go/quic-go/internal/synctest"
 	"github.com/quic-go/quic-go/internal/wire"
 
 	"github.com/stretchr/testify/assert"
@@ -543,6 +543,13 @@ func TestSendStreamCloseForShutdown(t *testing.T) {
 		case err := <-errChan:
 			require.ErrorIs(t, err, assert.AnError)
 		default:
+		}
+
+		select {
+		case <-str.Context().Done():
+			require.ErrorIs(t, context.Cause(str.Context()), assert.AnError)
+		default:
+			t.Fatal("context should be cancelled after closeForShutdown")
 		}
 
 		// STOP_SENDING frames are ignored
