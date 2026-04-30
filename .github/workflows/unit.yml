@@ -1,5 +1,6 @@
 on: [push, pull_request]
 
+permissions: read-all
 
 jobs:
   unit:
@@ -47,7 +48,7 @@ jobs:
         run: go test -v -run=^$ -benchtime 0.5s -bench=. ./...
       - name: Upload coverage to Codecov
         if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         env:
           OS: ${{ matrix.os }}
           GO: ${{ matrix.go }}
@@ -57,7 +58,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload test report to Codecov
         if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         env:
           OS: ${{ matrix.os }}
           GO: ${{ matrix.go }}

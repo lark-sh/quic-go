@@ -1,9 +1,11 @@
 #!/bin/bash -eu
 
-export CXX="${CXX} -lresolv" # required by Go 1.20
+go version
+go env
 
-compile_go_fuzzer github.com/quic-go/quic-go/fuzzing/frames Fuzz frame_fuzzer
-compile_go_fuzzer github.com/quic-go/quic-go/fuzzing/header Fuzz header_fuzzer
-compile_go_fuzzer github.com/quic-go/quic-go/fuzzing/transportparameters Fuzz transportparameter_fuzzer
-compile_go_fuzzer github.com/quic-go/quic-go/fuzzing/tokens Fuzz token_fuzzer
-compile_go_fuzzer github.com/quic-go/quic-go/fuzzing/handshake Fuzz handshake_fuzzer
+compile_native_go_fuzzer_v2 github.com/quic-go/quic-go/internal/wire FuzzFrames frame_fuzzer
+compile_native_go_fuzzer_v2 github.com/quic-go/quic-go/internal/wire FuzzTransportParameters transportparameter_fuzzer
+compile_native_go_fuzzer_v2 github.com/quic-go/quic-go/http3 FuzzFrameParser http3_frame_fuzzer
+compile_native_go_fuzzer_v2 github.com/quic-go/quic-go/internal/wire FuzzHeaderParser header_fuzzer
+compile_native_go_fuzzer_v2 github.com/quic-go/quic-go/internal/handshake FuzzHandshake handshake_fuzzer
+compile_native_go_fuzzer_v2 github.com/quic-go/quic-go/http3 FuzzHeaderParsing http3_header_parsing_fuzzer
