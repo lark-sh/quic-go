@@ -8,13 +8,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [ "ubuntu", "windows", "macos" ]
-        go: [ "1.25.x", "1.26.x" ]
+        go: [ "1.25.x", "1.26.x", "1.27.0-rc.1" ]
     runs-on: ${{ fromJSON(vars[format('UNIT_RUNNER_{0}', matrix.os)] || format('"{0}-latest"', matrix.os)) }}
     name: Unit tests (${{ matrix.os}}, Go ${{ matrix.go }})
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ matrix.go }}
           check-latest: true
@@ -45,15 +45,15 @@ jobs:
           TIMESCALE_FACTOR: 20
         run: go test -v -shuffle on ./...
       - name: Run handshake tests in FIPS140 mode
-        if: ${{ matrix.go == '1.26.x' }}
+        if: ${{ matrix.go != '1.25.x' }}
         env:
           GODEBUG: fips140=only
-        run: go test -v ./internal/handshake -run 'TestToken|TestRetry|TestInitial'
+        run: go test -v ./internal/handshake -run 'TestToken|TestRetry|TestInitial|TestDecode|TestEncrypt'
       - name: Run benchmark tests
         run: go test -v -run=^$ -benchtime 0.5s -bench=. ./...
       - name: Upload coverage to Codecov
         if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         env:
           OS: ${{ matrix.os }}
           GO: ${{ matrix.go }}
@@ -63,7 +63,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload test report to Codecov
         if: ${{ !cancelled() }}
-        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         env:
           OS: ${{ matrix.os }}
           GO: ${{ matrix.go }}
